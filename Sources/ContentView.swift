@@ -109,10 +109,91 @@ final class AppModel: ObservableObject {
     func checkForUpdates() async {
         isCheckingUpdate = true
         updateDismissed  = false
-        let info = await UpdateChecker.check(current: AppVersion.current)
-        updateInfo       = info
+        updateInfo       = await UpdateChecker.check(current: AppVersion.current)
         isCheckingUpdate = false
-        if info == nil { } // already up to date — no banner needed
+    }
+
+    // MARK: Install update
+
+    enum InstallState { case idle, downloading, replacing }
+    @Published var installState: InstallState = .idle
+    @Published var installError: String?      = nil
+
+    func installUpdate(_ info: UpdateInfo) async {
+        guard let assetURL = info.assetURL else {
+            // No binary attached — open browser as fallback
+            NSWorkspace.shared.open(info.releaseURL)
+            return
+        }
+
+        installState = .downloading
+        installError = nil
+
+        do {
+            // 1. Download the ZIP
+            let (localZip, _) = try await URLSession.shared.download(from: assetURL)
+
+            // 2. Unzip into a temp directory
+            let tempDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("metarandom-update-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+            let unzip = Process()
+            unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+            unzip.arguments     = ["-o", localZip.path, "-d", tempDir.path]
+            unzip.standardOutput = FileHandle.nullDevice
+            unzip.standardError  = FileHandle.nullDevice
+            try unzip.run()
+            unzip.waitUntilExit()
+
+            // 3. Find the .app in the unzipped contents
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: tempDir, includingPropertiesForKeys: nil)
+            guard let newApp = contents.first(where: { $0.pathExtension == "app" }) else {
+                throw NSError(domain: "UpdateInstaller", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "No .app found in ZIP"])
+            }
+
+            // 4. Determine current app path
+            let currentApp = Bundle.main.bundleURL
+
+            // 5. Write a detached shell script that replaces the app after this process exits
+            let script = """
+            #!/bin/bash
+            # Wait for the app to fully quit
+            sleep 2
+            rm -rf '\(currentApp.path)'
+            cp -R '\(newApp.path)' '\(currentApp.path)'
+            # Remove quarantine so macOS doesn't block the updated app
+            xattr -rd com.apple.quarantine '\(currentApp.path)' 2>/dev/null || true
+            codesign --force --deep --sign - '\(currentApp.path)' 2>/dev/null || true
+            open '\(currentApp.path)'
+            rm -rf '\(tempDir.path)'
+            """
+
+            let scriptURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("metarandom_install.sh")
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+            // 6. Run detached (don't wait — we're about to quit)
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments     = [scriptURL.path]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError  = FileHandle.nullDevice
+            try proc.run()
+
+            // 7. Quit so the script can replace the bundle
+            installState = .replacing
+            try await Task.sleep(nanoseconds: 300_000_000)  // brief pause for UI to show "Updating…"
+            NSApplication.shared.terminate(nil)
+
+        } catch {
+            installState = .idle
+            installError = "Update failed: \(error.localizedDescription)"
+        }
     }
 
     // MARK: Helpers
@@ -180,30 +261,51 @@ struct ContentView: View {
                 .foregroundColor(Color.appAccent)
                 .font(.system(size: 14))
 
-            Text("Update v\(info.version) available")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.white)
+            // Label changes based on install state
+            Group {
+                switch model.installState {
+                case .idle:
+                    Text("Update v\(info.version) available")
+                case .downloading:
+                    HStack(spacing: 6) {
+                        ProgressView().scaleEffect(0.6).tint(.white)
+                        Text("Downloading…")
+                    }
+                case .replacing:
+                    Text("Updating… closing app")
+                }
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(.white)
+
+            if let err = model.installError {
+                Text(err)
+                    .font(.system(size: 10))
+                    .foregroundColor(.orange)
+            }
 
             Spacer()
 
-            Button("Download") {
-                NSWorkspace.shared.open(info.releaseURL)
-            }
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundColor(Color.appAccent)
-            .buttonStyle(.plain)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.appAccent, lineWidth: 1))
+            if model.installState == .idle {
+                Button(info.assetURL != nil ? "Install" : "Download") {
+                    Task { await model.installUpdate(info) }
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(Color.appAccent)
+                .buttonStyle(.plain)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.appAccent, lineWidth: 1))
 
-            Button {
-                model.updateDismissed = true
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(Color.appSecondary)
+                Button {
+                    model.updateDismissed = true
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color.appSecondary)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

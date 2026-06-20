@@ -3,6 +3,7 @@ import Foundation
 struct UpdateInfo: Sendable {
     let version: String
     let releaseURL: URL
+    let assetURL: URL?      // direct ZIP download URL, nil if no asset attached
 }
 
 enum UpdateChecker {
@@ -19,7 +20,6 @@ enum UpdateChecker {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            // 404 means no releases yet — that's fine
             if let http = response as? HTTPURLResponse, http.statusCode == 404 { return nil }
 
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -29,10 +29,18 @@ enum UpdateChecker {
             let remote = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
             guard isNewer(remote: remote, than: current) else { return nil }
 
-            let url = (json["html_url"] as? String).flatMap(URL.init) ?? fallbackURL
-            return UpdateInfo(version: remote, releaseURL: url)
+            let releaseURL = (json["html_url"] as? String).flatMap(URL.init) ?? fallbackURL
+
+            // Find the ZIP asset
+            let assets = json["assets"] as? [[String: Any]] ?? []
+            let assetURL = assets
+                .first { ($0["name"] as? String)?.hasSuffix(".zip") == true }
+                .flatMap { $0["browser_download_url"] as? String }
+                .flatMap(URL.init)
+
+            return UpdateInfo(version: remote, releaseURL: releaseURL, assetURL: assetURL)
         } catch {
-            return nil   // offline or timeout — silent fail
+            return nil
         }
     }
 
