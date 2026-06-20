@@ -242,6 +242,13 @@ struct ContentView: View {
                         }
                     }
                     .frame(maxWidth: .infinity)
+
+                    Spacer(minLength: 0)
+
+                    Text("Developed by Marco and Yoshi 🗺️🙏🏼")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color.appSecondary.opacity(0.55))
+                        .padding(.bottom, 4)
                 }
                 .padding(32)
             }
