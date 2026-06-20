@@ -2,7 +2,7 @@ import SwiftUI
 
 enum AppVersion {
     // Single source of truth — also written to Info.plist by build.sh
-    static let current = "1.0"
+    static let current = "1.1"
 }
 
 @main
