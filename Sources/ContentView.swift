@@ -2,26 +2,25 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-// MARK: - Color helpers
+// MARK: - Color palette
 
 extension Color {
-    static let appBg         = Color(red: 0.059, green: 0.059, blue: 0.102)  // #0F0F1A
-    static let appAccent     = Color(red: 0.486, green: 0.302, blue: 1.000)  // #7C4DFF
-    static let appSuccess    = Color(red: 0.298, green: 0.686, blue: 0.314)  // #4CAF50
-    static let appSecondary  = Color(red: 0.565, green: 0.565, blue: 0.690)  // #9090B0
-    static let appCard       = Color(red: 0.102, green: 0.122, blue: 0.200)  // #1A1F33
-    static let appDivider    = Color(red: 0.165, green: 0.184, blue: 0.290)  // #2A2F4A
+    static let appBg        = Color(red: 0.059, green: 0.059, blue: 0.102)  // #0F0F1A
+    static let appAccent    = Color(red: 0.486, green: 0.302, blue: 1.000)  // #7C4DFF
+    static let appSuccess   = Color(red: 0.298, green: 0.686, blue: 0.314)  // #4CAF50
+    static let appSecondary = Color(red: 0.565, green: 0.565, blue: 0.690)  // #9090B0
+    static let appCard      = Color(red: 0.102, green: 0.122, blue: 0.200)  // #1A1F33
+    static let appDivider   = Color(red: 0.165, green: 0.184, blue: 0.290)  // #2A2F4A
+    static let appUpdate    = Color(red: 0.1,   green: 0.18,  blue: 0.30)   // update bar bg
 }
 
-// MARK: - Ghost icon (same path as Android vector drawable)
+// MARK: - Ghost icon (same SVG path as Android vector drawable)
 
 struct GhostShape: Shape {
     func path(in rect: CGRect) -> Path {
-        // Original viewbox 108×108: ghost body M54,16 … Z; eye circles at (38,40) r6 and (70,40) r6
         let sx = rect.width  / 108.0
         let sy = rect.height / 108.0
         func pt(_ x: Double, _ y: Double) -> CGPoint { .init(x: x * sx, y: y * sy) }
-
         var p = Path()
         p.move(to: pt(54, 16))
         p.addCurve(to: pt(28, 44), control1: pt(38, 16), control2: pt(28, 28))
@@ -41,45 +40,46 @@ struct GhostShape: Shape {
 
 struct GhostView: View {
     var size: CGFloat = 72
-
     var body: some View {
         ZStack {
-            GhostShape()
-                .fill(Color.white)
-                .frame(width: size, height: size)
-            // Left eye  — center (38,40) in 108×108
-            Circle()
-                .fill(Color.appAccent)
-                .frame(width: size * 12 / 108, height: size * 12 / 108)
+            GhostShape().fill(Color.white).frame(width: size, height: size)
+            Circle().fill(Color.appAccent)
+                .frame(width: size * 12/108, height: size * 12/108)
                 .offset(x: (38 - 54) / 108 * size, y: (40 - 54) / 108 * size)
-            // Right eye — center (70,40) in 108×108
-            Circle()
-                .fill(Color.appAccent)
-                .frame(width: size * 12 / 108, height: size * 12 / 108)
+            Circle().fill(Color.appAccent)
+                .frame(width: size * 12/108, height: size * 12/108)
                 .offset(x: (70 - 54) / 108 * size, y: (40 - 54) / 108 * size)
         }
         .frame(width: size, height: size)
     }
 }
 
-// MARK: - App state model
+// MARK: - App model
 
 struct ResultItem: Identifiable {
-    let id   = UUID()
+    let id      = UUID()
     let url: URL
     let summary: String
 }
 
 @MainActor
 final class AppModel: ObservableObject {
+
     enum State { case idle, processing(String), done([ResultItem]), failed(String) }
 
-    @Published var state: State = .idle
+    @Published var state: State      = .idle
+    @Published var updateInfo: UpdateInfo? = nil
+    @Published var updateDismissed  = false
+    @Published var isCheckingUpdate = false
+
+    var showUpdateBanner: Bool { updateInfo != nil && !updateDismissed }
+
+    // MARK: File processing
 
     func processFiles(_ urls: [URL]) async {
         let supported = urls.filter { isSupported($0) }
         guard !supported.isEmpty else {
-            state = .failed("No supported files dropped.\nAccepted: JPG, HEIC, PNG, MP4, MOV.")
+            state = .failed("No supported files dropped.\nAccepted: JPG · HEIC · PNG · MP4 · MOV")
             return
         }
 
@@ -88,18 +88,15 @@ final class AppModel: ObservableObject {
             state = .processing(supported.count == 1
                 ? "Anonymizing metadata…"
                 : "Processing \(index + 1) of \(supported.count)…")
-
             do {
                 let (outURL, summary) = isVideo(url)
                     ? try await VideoProcessor.process(url: url)
                     : try ImageProcessor.process(url: url)
                 results.append(ResultItem(url: outURL, summary: summary))
             } catch {
-                // Skip failed file, continue with rest
-                print("[MetaRandom] Failed \(url.lastPathComponent): \(error)")
+                print("[MetaRandom] \(url.lastPathComponent): \(error)")
             }
         }
-
         state = results.isEmpty
             ? .failed("Could not process any files. Check Console for details.")
             : .done(results)
@@ -107,14 +104,26 @@ final class AppModel: ObservableObject {
 
     func reset() { state = .idle }
 
+    // MARK: Update check
+
+    func checkForUpdates() async {
+        isCheckingUpdate = true
+        updateDismissed  = false
+        let info = await UpdateChecker.check(current: AppVersion.current)
+        updateInfo       = info
+        isCheckingUpdate = false
+        if info == nil { } // already up to date — no banner needed
+    }
+
+    // MARK: Helpers
+
     private func isVideo(_ url: URL) -> Bool {
         VideoProcessor.supportedExtensions.contains(url.pathExtension.lowercased())
     }
-
     private func isSupported(_ url: URL) -> Bool {
-        let ext = url.pathExtension.lowercased()
-        return ImageProcessor.supportedExtensions.contains(ext)
-            || VideoProcessor.supportedExtensions.contains(ext)
+        let e = url.pathExtension.lowercased()
+        return ImageProcessor.supportedExtensions.contains(e)
+            || VideoProcessor.supportedExtensions.contains(e)
     }
 }
 
@@ -125,41 +134,87 @@ struct ContentView: View {
     @State private var isTargeted  = false
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             Color.appBg.ignoresSafeArea()
 
-            VStack(spacing: 16) {
-                GhostView(size: 64)
-                    .padding(.top, 8)
-
-                Text("Metadata Randomizer")
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundColor(.white)
-                    .tracking(0.4)
-
-                Group {
-                    switch model.state {
-                    case .idle:
-                        dropZoneView
-                    case .processing(let msg):
-                        processingView(msg)
-                    case .done(let items):
-                        doneView(items)
-                    case .failed(let msg):
-                        failedView(msg)
-                    }
+            VStack(spacing: 0) {
+                // Update banner — pinned at the very top
+                if model.showUpdateBanner, let info = model.updateInfo {
+                    updateBanner(info)
                 }
-                .frame(maxWidth: .infinity)
+
+                // Main content
+                VStack(spacing: 16) {
+                    GhostView(size: 64).padding(.top, 16)
+
+                    Text("Metadata Randomizer")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundColor(.white)
+                        .tracking(0.4)
+
+                    Group {
+                        switch model.state {
+                        case .idle:              idleView
+                        case .processing(let m): processingView(m)
+                        case .done(let items):   doneView(items)
+                        case .failed(let m):     failedView(m)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .padding(32)
             }
-            .padding(32)
         }
         .frame(width: 460, height: 560)
+        .task { await model.checkForUpdates() }
+        .onReceive(NotificationCenter.default.publisher(for: .checkForUpdates)) { _ in
+            Task { await model.checkForUpdates() }
+        }
+    }
+
+    // MARK: Update banner
+
+    private func updateBanner(_ info: UpdateInfo) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.down.circle.fill")
+                .foregroundColor(Color.appAccent)
+                .font(.system(size: 14))
+
+            Text("Update v\(info.version) available")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white)
+
+            Spacer()
+
+            Button("Download") {
+                NSWorkspace.shared.open(info.releaseURL)
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(Color.appAccent)
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.appAccent, lineWidth: 1))
+
+            Button {
+                model.updateDismissed = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Color.appSecondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.appUpdate)
+        .overlay(Divider().foregroundColor(Color.appDivider), alignment: .bottom)
     }
 
     // MARK: Drop zone
 
-    private var dropZoneView: some View {
-        VStack(spacing: 16) {
+    private var idleView: some View {
+        VStack(spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: 14)
                     .strokeBorder(
@@ -168,20 +223,15 @@ struct ContentView: View {
                     )
                     .background(
                         RoundedRectangle(cornerRadius: 14)
-                            .fill(isTargeted
-                                  ? Color.appAccent.opacity(0.08)
-                                  : Color.appCard.opacity(0.5))
+                            .fill(isTargeted ? Color.appAccent.opacity(0.08) : Color.appCard.opacity(0.5))
                     )
-
                 VStack(spacing: 12) {
                     Image(systemName: "arrow.down.doc.fill")
                         .font(.system(size: 36))
                         .foregroundColor(isTargeted ? Color.appAccent : Color.appSecondary)
-
                     Text("Drop photos or videos here")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundColor(isTargeted ? .white : Color.appSecondary)
-
                     Text("JPG · HEIC · PNG · MP4 · MOV")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(Color.appSecondary.opacity(0.7))
@@ -189,13 +239,11 @@ struct ContentView: View {
                 }
                 .padding()
             }
-            .frame(height: 220)
+            .frame(height: 200)
             .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
                 Task {
                     var urls: [URL] = []
-                    for provider in providers {
-                        if let url = await resolveURL(provider) { urls.append(url) }
-                    }
+                    for p in providers { if let u = await resolveURL(p) { urls.append(u) } }
                     await model.processFiles(urls)
                 }
                 return true
@@ -206,6 +254,24 @@ struct ContentView: View {
                 .foregroundColor(Color.appSecondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
+
+            // Manual update check
+            Button {
+                Task { await model.checkForUpdates() }
+            } label: {
+                HStack(spacing: 5) {
+                    if model.isCheckingUpdate {
+                        ProgressView().scaleEffect(0.6).tint(Color.appSecondary)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    Text(model.isCheckingUpdate ? "Checking…" : "Check for updates")
+                }
+                .font(.system(size: 11))
+                .foregroundColor(Color.appSecondary)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
         }
     }
 
@@ -213,46 +279,33 @@ struct ContentView: View {
 
     private func processingView(_ message: String) -> some View {
         VStack(spacing: 20) {
-            ProgressView()
-                .progressViewStyle(.circular)
-                .scaleEffect(1.3)
-                .tint(Color.appAccent)
-
-            Text(message)
-                .font(.system(size: 14))
-                .foregroundColor(Color.appSecondary)
+            ProgressView().progressViewStyle(.circular).scaleEffect(1.3).tint(Color.appAccent)
+            Text(message).font(.system(size: 14)).foregroundColor(Color.appSecondary)
         }
-        .frame(height: 220)
+        .frame(height: 260)
     }
 
     // MARK: Done
 
     private func doneView(_ items: [ResultItem]) -> some View {
-        VStack(spacing: 16) {
-            // Confirmation card
+        VStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 10) {
                 Label("Anonymized", systemImage: "checkmark.circle.fill")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundColor(Color.appSuccess)
                     .tracking(0.6)
-
-                Divider()
-                    .background(Color.appDivider)
-
+                Divider().background(Color.appDivider)
                 ForEach(items) { item in
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: item.url.pathExtension == "mp4" ? "video.fill" : "photo.fill")
                             .font(.system(size: 11))
                             .foregroundColor(Color.appAccent)
                             .padding(.top, 2)
-
                         Text(item.summary)
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundColor(.white)
                             .lineSpacing(2)
-
                         Spacer()
-
                         Button {
                             NSWorkspace.shared.selectFile(item.url.path, inFileViewerRootedAtPath: "")
                         } label: {
@@ -267,20 +320,15 @@ struct ContentView: View {
             }
             .padding(16)
             .background(Color.appCard)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.appDivider, lineWidth: 1)
-            )
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.appDivider, lineWidth: 1))
             .cornerRadius(12)
 
-            // Hint
             Text("Saved alongside original files.\nSend as File (not Photo) in Telegram to preserve metadata.")
                 .font(.system(size: 11))
                 .foregroundColor(Color.appSecondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
 
-            // Process more
             Button(action: { model.reset() }) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.counterclockwise")
@@ -290,10 +338,7 @@ struct ContentView: View {
                 .foregroundColor(Color.appAccent)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 8)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color.appAccent, lineWidth: 1.5)
-                )
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.appAccent, lineWidth: 1.5))
             }
             .buttonStyle(.plain)
         }
@@ -304,37 +349,27 @@ struct ContentView: View {
     private func failedView(_ message: String) -> some View {
         VStack(spacing: 20) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 32))
-                .foregroundColor(.orange)
-
-            Text(message)
-                .font(.system(size: 13))
-                .foregroundColor(Color.appSecondary)
-                .multilineTextAlignment(.center)
-                .lineSpacing(3)
-
+                .font(.system(size: 32)).foregroundColor(.orange)
+            Text(message).font(.system(size: 13)).foregroundColor(Color.appSecondary)
+                .multilineTextAlignment(.center).lineSpacing(3)
             Button(action: { model.reset() }) {
                 Text("Try again")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(Color.appAccent)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(Color.appAccent, lineWidth: 1.5)
-                    )
+                    .padding(.horizontal, 20).padding(.vertical, 8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.appAccent, lineWidth: 1.5))
             }
             .buttonStyle(.plain)
         }
-        .frame(height: 220)
+        .frame(height: 260)
     }
 
-    // MARK: URL resolution helper
+    // MARK: URL resolution
 
     private func resolveURL(_ provider: NSItemProvider) async -> URL? {
-        await withCheckedContinuation { continuation in
-            _ = provider.loadObject(ofClass: NSURL.self) { object, _ in
-                continuation.resume(returning: object as? URL)
+        await withCheckedContinuation { cont in
+            _ = provider.loadObject(ofClass: NSURL.self) { obj, _ in
+                cont.resume(returning: obj as? URL)
             }
         }
     }
