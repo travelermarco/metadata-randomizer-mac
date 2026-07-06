@@ -1,5 +1,7 @@
 # Metadata Randomizer for Mac
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?logo=open-source-initiative&logoColor=white)](LICENSE)
+
 A macOS app that **strips and replaces photo/video metadata with randomized fake data** — so your real GPS location, device identity, and timestamps never leave your Mac when you share a file.
 
 ## How it works
